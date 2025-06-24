@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { ethers } = require('ethers');
 const { AcrossBridge, CONFIG } = require('./scripts/across-bridge');
+// const { fetchAndLog } = require('./oracle_impl');
 
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const USER_WALLET_ADDRESS = process.env.USER_WALLET_ADDRESS;
@@ -38,9 +39,11 @@ async function dynamicBridgeExample() {
       tokenSymbol: 'USDC',
       originChainId: 84532, // Base Sepolia
       destinationChainId: 11155111, // Sepolia
-      amount: (1 * 1e6).toString(), // 10 USDC (6 decimals)
+      amount: (8 * 1e6).toString(), // 10 USDC (6 decimals)
       recipient: USER_WALLET_ADDRESS 
     };
+
+    // const usdcBridgeParams = await fetchAndLog();
 
     console.log('🧪 Running USDC bridge dry run...');
     const usdcDryRun = await bridge.dryRun(usdcBridgeParams);
