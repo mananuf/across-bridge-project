@@ -56,25 +56,25 @@ async function dynamicBridgeExample() {
     }
 
     // EXAMPLE 4: Auto-detect and bridge whatever token you have most of
-    console.log('\n📋 EXAMPLE 4: Auto-detect best token to bridge');
+    // console.log('\n📋 EXAMPLE 4: Auto-detect best token to bridge');
     
-    const autoDetectParams = {
-      originChainId: 84532, // Base Sepolia
-      destinationChainId: 11155111, // Sepolia
-      minAmountUSD: 1, // Minimum $1 worth
-      recipient: USER_WALLET_ADDRESS
-    };
+    // const autoDetectParams = {
+    //   originChainId: 84532, // Base Sepolia
+    //   destinationChainId: 11155111, // Sepolia
+    //   minAmountUSD: 1, // Minimum $1 worth
+    //   recipient: USER_WALLET_ADDRESS
+    // };
 
-    const bestToken = await bridge.findBestTokenToBridge(autoDetectParams);
+    // const bestToken = await bridge.findBestTokenToBridge(autoDetectParams);
     
-    if (bestToken) {
-      console.log('🎯 Best token found:', bestToken);
-      console.log(`💰 Available: ${bestToken.formattedBalance} ${bestToken.symbol}`);
-      console.log(`📊 Estimated USD value: $${bestToken.estimatedUSDValue}`);
+    // if (bestToken) {
+    //   console.log('🎯 Best token found:', bestToken);
+    //   console.log(`💰 Available: ${bestToken.formattedBalance} ${bestToken.symbol}`);
+    //   console.log(`📊 Estimated USD value: $${bestToken.estimatedUSDValue}`);
       
-    } else {
-      console.log('❌ No suitable token found for bridging');
-    }
+    // } else {
+    //   console.log('❌ No suitable token found for bridging');
+    // }
 
   } catch (error) {
     console.error('💥 Dynamic bridge example failed:', error.message);

@@ -96,7 +96,24 @@ const CONFIG = {
   SPOKE_POOL_ABI: [
     'function depositV3(address depositor, address recipient, address inputToken, address outputToken, uint256 inputAmount, uint256 outputAmount, uint256 destinationChainId, address exclusiveRelayer, uint32 quoteTimestamp, uint32 fillDeadline, uint32 exclusivityDeadline, bytes calldata message) payable',
     'function fillV3Relay(tuple(address depositor, address recipient, address exclusiveRelayer, address inputToken, address outputToken, uint256 inputAmount, uint256 outputAmount, uint256 originChainId, uint32 depositId, uint32 fillDeadline, uint32 exclusivityDeadline, bytes message) relayData, uint256 repaymentChainId)'
-  ]
+  ],
+
+  ORIGIN_SETTLERS: {
+    1: '0x41a6fa8d160fe2d2d2fd2b227f4ce160eb88709d', // Ethereum (lowercase)
+    11155111: '0x41a6fa8d160fe2d2d2fd2b227f4ce160eb88709d', // Sepolia (lowercase)
+    8453: '0x41a6fa8d160fe2d2d2fd2b227f4ce160eb88709d', // Base (lowercase)
+    84532: '0x41a6fa8d160fe2d2d2fd2b227f4ce160eb88709d', // Base Sepolia (lowercase)
+    137: '0x41a6fa8d160fe2d2d2fd2b227f4ce160eb88709d', // Polygon (lowercase)
+    42161: '0x41a6fa8d160fe2d2d2fd2b227f4ce160eb88709d', // Arbitrum (lowercase)
+    10: '0x41a6fa8d160fe2d2d2fd2b227f4ce160eb88709d', // Optimism (lowercase)
+  },
+  
+  ORIGIN_SETTLER_ABI: [
+    'function executeOrder(tuple(bytes32 orderDataType, bytes orderData) order) payable',
+    'function multicall(bytes[] calldata data) payable returns (bytes[] memory results)'
+  ],
+  
+  ORDER_DATA_TYPE_HASH: '0x5c54fefb766ed428c96be865b4fef0f0e87cf42b6cd5e0e19d5c7b43ba7fe326'
 };
 
 class AcrossBridge {
@@ -108,9 +125,6 @@ class AcrossBridge {
     this.wallets = {};
   }
 
-  /**
-   * Get chain name from chain ID
-   */
   getChainName(chainId) {
     const chainNames = {
       1: 'ETHEREUM',
@@ -125,9 +139,6 @@ class AcrossBridge {
     return chainNames[chainId];
   }
 
-  /**
-   * Get token configuration including address, decimals, and symbol
-   */
   getTokenConfig(tokenSymbol, chainId) {
     const token = CONFIG.TOKENS[tokenSymbol.toUpperCase()];
     
@@ -153,9 +164,6 @@ class AcrossBridge {
     };
   }
 
-  /**
-   * Enhanced token validation with better error messages
-   */
   async validateTokenSupport(tokenSymbol, originChainId, destinationChainId) {
     try {
       const inputTokenConfig = this.getTokenConfig(tokenSymbol, originChainId);
@@ -188,9 +196,6 @@ class AcrossBridge {
     console.log('✅ Providers initialized for chains:', Object.keys(rpcUrls));
   }
 
-  /**
-   * Enhanced balance checking with dynamic token support
-   */
   async checkBalances(tokenSymbol, amount, chainId) {
     const wallet = this.wallets[chainId];
     const provider = this.providers[chainId];
@@ -255,9 +260,6 @@ class AcrossBridge {
     };
   }
 
-  /**
-   * Get suggested fees from Across API
-   */
   async getSuggestedFees(params) {
     const {
       inputToken,
@@ -268,32 +270,35 @@ class AcrossBridge {
       recipient,
       timestamp
     } = params;
-
+  
     try {
       const url = `${this.apiUrl}/suggested-fees`;
       const response = await axios.get(url, {
         params: {
           inputToken,
           outputToken,
-          originChainId,
-          destinationChainId,
-          amount,
+          originChainId: originChainId.toString(),
+          destinationChainId: destinationChainId.toString(),
+          amount: amount.toString(),
           recipient,
-          timestamp: timestamp || Math.floor(Date.now() / 1000)
+          timestamp: timestamp || Math.floor(Date.now() / 1000),
+          // Add missing required parameters
+          depositor: recipient, // Often required by Across API
+          exclusiveRelayer: '0x0000000000000000000000000000000000000000',
+          exclusivityDeadline: (timestamp || Math.floor(Date.now() / 1000)) + 300,
+          fillDeadline: (timestamp || Math.floor(Date.now() / 1000)) + 21600,
+          message: '0x'
         }
       });
-
+  
       console.log('💰 Fee estimation received from Across API');
       return response.data;
     } catch (error) {
-      console.error('❌ Failed to get suggested fees:', error.message);
-      throw new Error(`Fee estimation failed: ${error.message}`);
+      console.error('❌ Failed to get suggested fees:', error.response?.data || error.message);
+      throw new Error(`Fee estimation failed: ${error.response?.data?.message || error.message}`);
     }
   }
 
-  /**
-   * Get available routes from Across API
-   */
   async getAvailableRoutes(originChainId, destinationChainId) {
     try {
       const url = `${this.apiUrl}/available-routes`;
@@ -311,9 +316,6 @@ class AcrossBridge {
     }
   }
 
-  /**
-   * Approve ERC20 token spending if needed
-   */
   async approveTokenIfNeeded(tokenAddress, spenderAddress, amount, chainId) {
     if (tokenAddress === ethers.ZeroAddress) {
       console.log('✅ Native ETH transfer - no approval needed');
@@ -353,9 +355,62 @@ class AcrossBridge {
     }
   }
 
-  /**
-   * Perform pre-flight checks before executing bridge
-   */
+  generateIntentOrderData(params) {
+    const {
+      inputToken,
+      outputToken,
+      inputAmount,
+      outputAmount,
+      destinationChainId,
+      recipient,
+      fillDeadline,
+      exclusiveRelayer = ethers.ZeroAddress,
+      exclusivityPeriod = 0,
+      message = '0x'
+    } = params;
+  
+    console.log('🔧 Generating intent order data...');
+  
+    // Pad the depositor address (recipient) to 32 bytes
+    const paddedRecipient = ethers.zeroPadValue(recipient, 32);
+  
+    // Encode the order data using ABI encoding
+    const orderData = ethers.AbiCoder.defaultAbiCoder().encode(
+      [
+        'bytes32',    // paddedRecipient
+        'address',    // inputToken
+        'address',    // outputToken  
+        'uint256',    // inputAmount
+        'uint256',    // outputAmount
+        'uint256',    // destinationChainId
+        'address',    // exclusiveRelayer
+        'uint256',    // exclusivityPeriod
+        'uint256',    // fillDeadline
+        'bytes'       // message
+      ],
+      [
+        paddedRecipient,
+        inputToken,
+        outputToken,
+        inputAmount,
+        outputAmount,
+        destinationChainId,
+        exclusiveRelayer,
+        exclusivityPeriod,
+        fillDeadline,
+        message
+      ]
+    );
+  
+    const order = {
+      orderDataType: CONFIG.ORDER_DATA_TYPE_HASH,
+      orderData: orderData
+    };
+  
+    console.log('✅ Intent order data generated');
+    return order;
+  }
+
   async performPreFlightChecks(bridgeParams) {
     const {
       inputToken,
@@ -364,11 +419,10 @@ class AcrossBridge {
       amount,
       recipient
     } = bridgeParams;
-
-    console.log('🔍 Performing pre-flight checks...');
-
+  
+    console.log('🔍 Performing pre-flight checks for intent-based bridge...');
+  
     try {
-      // 1. Check wallet balances
       const wallet = this.wallets[originChainId];
       const provider = this.providers[originChainId];
       
@@ -385,90 +439,61 @@ class AcrossBridge {
         );
         tokenBalance = await tokenContract.balanceOf(wallet.address);
       }
-
-      // 2. Estimate gas costs
-      const spokePoolAddress = CONFIG.SPOKE_POOLS[originChainId];
-      if (!spokePoolAddress) {
-        throw new Error(`No SpokePool found for chain ${originChainId}`);
+  
+      // 2. Check if Origin Settler exists
+      const originSettlerAddress = CONFIG.ORIGIN_SETTLERS[originChainId];
+      if (!originSettlerAddress) {
+        throw new Error(`No AcrossOriginSettler found for chain ${originChainId}`);
       }
-
-      const spokePool = new ethers.Contract(spokePoolAddress, CONFIG.SPOKE_POOL_ABI, wallet);
-      
-      // Get current timestamp for quote
-      const currentTimestamp = Math.floor(Date.now() / 1000);
-      // Ensure timestamps fit in uint32 bounds
-      const maxUint32 = 4294967295;
-      const fillDeadline = Math.min(currentTimestamp + 21600, maxUint32); // 6 hours or max uint32
-      const exclusivityDeadline = Math.min(currentTimestamp + 300, maxUint32);
-
+  
+      // 3. Estimate gas for executeOrder
+      const originSettler = new ethers.Contract(
+        originSettlerAddress,
+        CONFIG.ORIGIN_SETTLER_ABI,
+        wallet
+      );
+  
       try {
-        const gasEstimate = await spokePool.depositV3.estimateGas(
-          wallet.address, // depositor
-          recipient, // recipient
-          inputToken, // inputToken
-          inputToken, // outputToken (same for now)
-          amount, // inputAmount
-          amount, // outputAmount (will be adjusted with fees)
-          destinationChainId, // destinationChainId
-          ethers.ZeroAddress, // exclusiveRelayer
-          currentTimestamp - 100, // quoteTimestamp
-          fillDeadline, // fillDeadline
-          exclusivityDeadline, // exclusivityDeadline
-          '0x', // message
-          { value: inputToken === ethers.ZeroAddress ? amount : 0 }
-        );
-
+        // Create a sample order for gas estimation
+        const currentTimestamp = Math.floor(Date.now() / 1000);
+        const sampleOrder = this.generateIntentOrderData({
+          inputToken,
+          outputToken: inputToken,
+          inputAmount: amount,
+          outputAmount: amount,
+          destinationChainId,
+          recipient,
+          fillDeadline: currentTimestamp + 21600,
+          message: '0x'
+        });
+  
+        const gasEstimate = await originSettler.executeOrder.estimateGas(sampleOrder, {
+          value: inputToken === ethers.ZeroAddress ? amount : 0
+        });
+  
         const gasPrice = await provider.getFeeData();
         const estimatedCost = gasEstimate * gasPrice.gasPrice;
-
+  
         console.log(`⛽ Estimated gas: ${gasEstimate.toString()} units`);
         console.log(`💰 Estimated cost: ${ethers.formatEther(estimatedCost)} ETH`);
-
+  
         return {
           canProceed: true,
           balanceInfo: { ethBalance, tokenBalance },
           gasEstimate: { gasLimit: gasEstimate, estimatedCost, gasPrice: gasPrice.gasPrice },
-          spokePoolAddress,
-          contractParams: {
-            depositor: wallet.address,
-            recipient,
-            inputToken,
-            outputToken: inputToken,
-            inputAmount: amount,
-            outputAmount: amount,
-            destinationChainId,
-            exclusiveRelayer: ethers.ZeroAddress,
-            quoteTimestamp: currentTimestamp - 100,
-            fillDeadline,
-            exclusivityDeadline,
-            message: '0x'
-          }
+          originSettlerAddress
         };
-
+  
       } catch (gasError) {
-        console.warn('⚠️ Gas estimation failed, proceeding with default estimates');
+        console.warn('⚠️ Gas estimation failed, using default estimates');
         return {
           canProceed: true,
           balanceInfo: { ethBalance, tokenBalance },
-          gasEstimate: { gasLimit: 300000n, estimatedCost: ethers.parseEther('0.01'), gasPrice: ethers.parseUnits('20', 'gwei') },
-          spokePoolAddress,
-          contractParams: {
-            depositor: wallet.address,
-            recipient,
-            inputToken,
-            outputToken: inputToken,
-            inputAmount: amount,
-            outputAmount: amount,
-            destinationChainId,
-            exclusiveRelayer: ethers.ZeroAddress,
-            quoteTimestamp: currentTimestamp - 100,
-            fillDeadline: currentTimestamp + 21600,
-            exclusivityDeadline: currentTimestamp + 300,
-            message: '0x'
-          }
+          gasEstimate: { gasLimit: 500000n, estimatedCost: ethers.parseEther('0.02'), gasPrice: ethers.parseUnits('20', 'gwei') },
+          originSettlerAddress
         };
       }
-
+  
     } catch (error) {
       console.error('❌ Pre-flight checks failed:', error.message);
       return {
@@ -478,134 +503,159 @@ class AcrossBridge {
     }
   }
 
-  /**
-   * Execute the bridge transaction
-   */
-  async executeBridge(bridgeParams) {
-    const {
+async executeBridge(bridgeParams) {
+  const {
+    inputToken,
+    outputToken,
+    originChainId,
+    destinationChainId,
+    amount,
+    recipient,
+    message = '0x'
+  } = bridgeParams;
+
+  console.log('🌉 Executing bridge transaction with intent-based flow...');
+
+  try {
+    // 1. Get fee estimates first
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const feeData = await this.getSuggestedFees({
       inputToken,
       outputToken,
       originChainId,
       destinationChainId,
       amount,
       recipient,
-      message = '0x'
-    } = bridgeParams;
-  
-    console.log('🌉 Executing bridge transaction...');
-  
-    try {
-      // 1. Get pre-flight check results
-      const preFlightResults = await this.performPreFlightChecks(bridgeParams);
-      
-      if (!preFlightResults.canProceed) {
-        throw new Error(`Pre-flight checks failed: ${preFlightResults.error}`);
-      }
-  
-      // 2. Get fee estimates with message
-      const feeData = await this.getSuggestedFees({
-        inputToken,
-        outputToken,
-        originChainId,
-        destinationChainId,
-        amount,
-        recipient,
-        timestamp: preFlightResults.contractParams.quoteTimestamp,
-        message
-      });
-  
-      // 3. Calculate output amount after fees - Fix fee calculation
-      const lpFeeAmount = BigInt(feeData.lpFee?.total || '0');
-      const relayFeeAmount = BigInt(feeData.totalRelayFee?.total || '0');
-      const outputAmount = BigInt(amount) - lpFeeAmount - relayFeeAmount;
-  
-      if (outputAmount <= 0n) {
-        throw new Error('Output amount after fees would be zero or negative');
-      }
-  
-      // 4. Approve token spending if needed
-      const wallet = this.wallets[originChainId];
-      const spokePoolAddress = preFlightResults.spokePoolAddress;
-  
-      await this.approveTokenIfNeeded(inputToken, spokePoolAddress, amount, originChainId);
-  
-      // 5. Execute deposit transaction with proper parameters
-      const spokePool = new ethers.Contract(spokePoolAddress, CONFIG.SPOKE_POOL_ABI, wallet);
-  
-      const quoteTimestamp = feeData.timestamp || Math.floor(Date.now() / 1000);
-      const maxUint32 = 4294967295;
-      const fillDeadline = Math.min(quoteTimestamp + 21600, maxUint32); // 6 hours or max uint32
-      const exclusivityDeadline = Math.min(quoteTimestamp + 300, maxUint32); 
-  
-      console.log('📝 Submitting bridge transaction...');
-      
-      // Create the deposit transaction with proper call data
-      const depositTx = await spokePool.depositV3(
-        wallet.address, // depositor
-        recipient, // recipient
-        inputToken, // inputToken
-        outputToken, // outputToken
-        amount.toString(), // inputAmount
-        outputAmount.toString(), // outputAmount (fee-adjusted)
-        destinationChainId, // destinationChainId
-        ethers.ZeroAddress, // exclusiveRelayer
-        quoteTimestamp, // quoteTimestamp from API
-        fillDeadline, // fillDeadline
-        exclusivityDeadline, // exclusivityDeadline
-        message, // message
-        {
-          value: inputToken === ethers.ZeroAddress ? amount : 0,
-          gasLimit: preFlightResults.gasEstimate.gasLimit
-        }
-      );
-  
-      console.log(`🚀 Bridge transaction submitted: ${depositTx.hash}`);
-      console.log('⏳ Waiting for confirmation...');
-  
-      const receipt = await depositTx.wait();
-      
-      console.log(`✅ Bridge transaction confirmed in block ${receipt.blockNumber}`);
-      console.log(`⛽ Gas used: ${receipt.gasUsed.toString()}`);
-  
-      return {
-        success: true,
-        transactionHash: depositTx.hash,
-        blockNumber: receipt.blockNumber,
-        gasUsed: receipt.gasUsed.toString(),
-        inputAmount: amount,
-        outputAmount: outputAmount.toString(),
-        fees: {
-          lpFee: lpFeeAmount.toString(),
-          relayFee: relayFeeAmount.toString(),
-          totalFees: (lpFeeAmount + relayFeeAmount).toString()
-        },
-        originChainId,
-        destinationChainId,
-        recipient
-      };
-  
-    } catch (error) {
-      console.error('❌ Bridge execution failed:', error.message);
-      
-      // Enhanced error handling for sendTransaction failures
-      if (error.message.includes('sendTransaction') || error.message.includes('revert')) {
-        console.error('💥 Transaction Revert Details:');
-        if (error.data) {
-          console.error('Error data:', error.data);
-        }
-        if (error.reason) {
-          console.error('Revert reason:', error.reason);
-        }
-      }
-      
-      throw error;
+      timestamp: currentTimestamp - 100,
+      message
+    });
+
+    // 2. Calculate output amount after fees
+    const lpFeeAmount = BigInt(feeData.lpFee?.total || '0');
+    const relayFeeAmount = BigInt(feeData.totalRelayFee?.total || '0');
+    const outputAmount = BigInt(amount) - lpFeeAmount - relayFeeAmount;
+
+    if (outputAmount <= 0n) {
+      throw new Error('Output amount after fees would be zero or negative');
     }
+
+    // 3. Set up timing parameters
+    const fillDeadline = currentTimestamp + 21600; // 6 hours from now
+    const exclusivityPeriod = 300; // 5 minutes
+
+    // 4. Get wallet and contract instances
+    const wallet = this.wallets[originChainId];
+    const originSettlerAddress = CONFIG.ORIGIN_SETTLERS[originChainId];
+    
+    if (!originSettlerAddress) {
+      throw new Error(`No AcrossOriginSettler found for chain ${originChainId}`);
+    }
+
+    // 5. Approve token spending to the Origin Settler (not SpokePool)
+    await this.approveTokenIfNeeded(inputToken, originSettlerAddress, amount, originChainId);
+
+    // 6. Generate the intent order data
+    const order = this.generateIntentOrderData({
+      inputToken,
+      outputToken,
+      inputAmount: amount,
+      outputAmount: outputAmount.toString(),
+      destinationChainId,
+      recipient,
+      fillDeadline,
+      exclusiveRelayer: ethers.ZeroAddress,
+      exclusivityPeriod,
+      message
+    });
+
+    // 7. Create the Origin Settler contract instance
+    const originSettler = new ethers.Contract(
+      originSettlerAddress,
+      CONFIG.ORIGIN_SETTLER_ABI,
+      wallet
+    );
+
+    console.log('📝 Submitting intent-based bridge transaction...');
+
+    // 8. Execute the order through the Origin Settler
+    const executeTx = await originSettler.executeOrder(order, {
+      value: inputToken === ethers.ZeroAddress ? amount : 0,
+      gasLimit: 500000 // Increased gas limit for intent execution
+    });
+
+    console.log(`🚀 Intent bridge transaction submitted: ${executeTx.hash}`);
+    console.log('⏳ Waiting for confirmation...');
+
+    const receipt = await executeTx.wait();
+    
+    console.log(`✅ Intent bridge transaction confirmed in block ${receipt.blockNumber}`);
+    console.log(`⛽ Gas used: ${receipt.gasUsed.toString()}`);
+
+    return {
+      success: true,
+      transactionHash: executeTx.hash,
+      blockNumber: receipt.blockNumber,
+      gasUsed: receipt.gasUsed.toString(),
+      inputAmount: amount,
+      outputAmount: outputAmount.toString(),
+      fees: {
+        lpFee: lpFeeAmount.toString(),
+        relayFee: relayFeeAmount.toString(),
+        totalFees: (lpFeeAmount + relayFeeAmount).toString()
+      },
+      originChainId,
+      destinationChainId,
+      recipient,
+      intentOrder: order
+    };
+
+  } catch (error) {
+    console.error('❌ Intent bridge execution failed:', error.message);
+    
+    // Enhanced error handling
+    if (error.message.includes('sendTransaction') || error.message.includes('revert')) {
+      console.error('💥 Transaction Revert Details:');
+      if (error.data) {
+        console.error('Error data:', error.data);
+      }
+      if (error.reason) {
+        console.error('Revert reason:', error.reason);
+      }
+      if (error.code) {
+        console.error('Error code:', error.code);
+      }
+    }
+    
+    throw error;
   }
+}
+
   
-  generateMessageForHandler(userAddress) {
+  generateMessageForHandler(userAddress, isContract = false) {
+    if (!isContract) {
+      // For EOA recipients, always use empty message
+      return '0x';
+    }
+    
+    // Only encode message for contract recipients
     const abiCoder = ethers.AbiCoder.defaultAbiCoder();
-    // Encode the userAddress for handler contract
     return abiCoder.encode(["address"], [userAddress]);
+  }
+
+  async isContract(address, chainId) {
+    try {
+      const provider = this.providers[chainId];
+      if (!provider) {
+        console.warn(`⚠️ No provider for chain ${chainId}, assuming EOA`);
+        return false;
+      }
+      
+      const code = await provider.getCode(address);
+      return code !== '0x' && code !== '0x0';
+    } catch (error) {
+      console.warn(`⚠️ Could not check if address is contract, assuming EOA:`, error.message);
+      return false;
+    }
   }
 
   /**
@@ -620,7 +670,7 @@ class AcrossBridge {
       recipient,
       message = null // Allow custom message
     } = params;
-  
+
     try {
       console.log(`🌉 Starting dynamic bridge for ${tokenSymbol}`);
       
@@ -631,10 +681,20 @@ class AcrossBridge {
         destinationChainId
       );
       
-      // 2. Generate proper message if not provided
-      const finalMessage = this.generateMessageForHandler(recipient);
-
-      console.log("FINAL MESAGE:", finalMessage);
+      // 2. Check if recipient is a contract and generate appropriate message
+      let finalMessage;
+      if (message !== null) {
+        finalMessage = message; // Use provided message
+      } else {
+        const recipientIsContract = await this.isContract(recipient, destinationChainId);
+        finalMessage = this.generateMessageForHandler(recipient, recipientIsContract);
+        
+        if (recipientIsContract) {
+          console.log(`📄 Generated handler message for contract recipient`);
+        } else {
+          console.log(`📄 Using empty message for EOA recipient`);
+        }
+      }
       
       // 3. Build bridge parameters
       const bridgeParams = {
@@ -662,7 +722,6 @@ class AcrossBridge {
       throw error;
     }
   }
-
   /**
    * Find the best token to bridge based on available balances
    */
@@ -1023,188 +1082,9 @@ class AcrossBridge {
     
     return targetTimestamp;
   }
-
-  /**
-   * Quick bridge helper - automatically finds best token and executes
-   */
-  async quickBridge(params) {
-    const {
-      originChainId,
-      destinationChainId,
-      recipient,
-      amountUSD = null,
-      tokenSymbol = null
-    } = params;
-
-    console.log('🚀 Starting Quick Bridge...');
-
-    try {
-      let tokenToBridge;
-      let bridgeAmount;
-
-      if (tokenSymbol && amountUSD) {
-        // User specified both token and amount
-        const tokenConfig = this.getTokenConfig(tokenSymbol, originChainId);
-        bridgeAmount = ethers.parseUnits(amountUSD.toString(), tokenConfig.decimals);
-        
-        await this.checkBalances(tokenSymbol, bridgeAmount, originChainId);
-        
-        tokenToBridge = {
-          symbol: tokenSymbol,
-          config: tokenConfig,
-          recommendedAmount: bridgeAmount.toString()
-        };
-      } else {
-        // Auto-detect best token to bridge
-        tokenToBridge = await this.findBestTokenToBridge({
-          originChainId,
-          destinationChainId,
-          minAmountUSD: amountUSD || 1,
-          recipient
-        });
-
-        if (!tokenToBridge) {
-          throw new Error('No suitable tokens found for bridging');
-        }
-
-        bridgeAmount = tokenToBridge.recommendedAmount;
-      }
-
-      console.log(`🎯 Selected token: ${tokenToBridge.symbol}`);
-      console.log(`💰 Bridge amount: ${ethers.formatUnits(bridgeAmount, tokenToBridge.config.decimals)} ${tokenToBridge.symbol}`);
-
-      // Execute the bridge
-      const result = await this.executeDynamicBridge({
-        tokenSymbol: tokenToBridge.symbol,
-        originChainId,
-        destinationChainId,
-        amount: bridgeAmount,
-        recipient
-      });
-
-      console.log('🎉 Quick Bridge completed successfully!');
-      return result;
-
-    } catch (error) {
-      console.error('❌ Quick Bridge failed:', error.message);
-      this.handleBridgeError(error);
-      throw error;
-    }
-  }
-}
-
-// Usage Examples and Helper Functions
-class BridgeExamples {
-  static async basicUsage() {
-    console.log('📚 Basic Bridge Usage Example\n');
-
-    // Initialize bridge
-    const bridge = new AcrossBridge('your-private-key-here', false); // false = mainnet
-    
-    // Setup RPC providers
-    const rpcUrls = {
-      1: 'https://eth-mainnet.g.alchemy.com/v2/your-api-key',
-      8453: 'https://base-mainnet.g.alchemy.com/v2/your-api-key'
-    };
-    
-    await bridge.initializeProviders(rpcUrls);
-
-    // Example 1: Dry run first
-    const dryRunResult = await bridge.dryRun({
-      tokenSymbol: 'USDC',
-      originChainId: 1, // Ethereum
-      destinationChainId: 8453, // Base
-      amount: ethers.parseUnits('100', 6), // 100 USDC
-      recipient: '0x742d35Cc6638C532532C21cF8eeEdCC44e32e6D4'
-    });
-
-    if (dryRunResult.canProceed) {
-      console.log('✅ Dry run successful, proceeding with bridge...');
-      
-      // Example 2: Execute the actual bridge
-      const bridgeResult = await bridge.executeDynamicBridge({
-        tokenSymbol: 'USDC',
-        originChainId: 1,
-        destinationChainId: 8453,
-        amount: ethers.parseUnits('100', 6),
-        recipient: '0x742d35Cc6638C532532C21cF8eeEdCC44e32e6D4'
-      });
-
-      console.log('Bridge completed:', bridgeResult);
-
-      // Example 3: Monitor the bridge
-      const monitorResult = await bridge.monitorBridge(
-        bridgeResult.transactionHash,
-        1, // origin chain
-        8453, // destination chain
-        1800000 // 30 minutes max wait
-      );
-
-      console.log('Monitor result:', monitorResult);
-    }
-  }
-
-  static async quickBridgeUsage() {
-    console.log('⚡ Quick Bridge Usage Example\n');
-
-    const bridge = new AcrossBridge('your-private-key-here');
-    
-    const rpcUrls = {
-      1: 'https://eth-mainnet.g.alchemy.com/v2/your-api-key',
-      42161: 'https://arb-mainnet.g.alchemy.com/v2/your-api-key'
-    };
-    
-    await bridge.initializeProviders(rpcUrls);
-
-    // Quick bridge - automatically finds best token and amount
-    const result = await bridge.quickBridge({
-      originChainId: 1, // Ethereum
-      destinationChainId: 42161, // Arbitrum
-      recipient: '0x742d35Cc6638C532532C21cF8eeEdCC44e32e6D4',
-      amountUSD: 50 // $50 worth
-    });
-
-    console.log('Quick bridge result:', result);
-  }
-
-  static async advancedUsage() {
-    console.log('🔧 Advanced Bridge Usage Example\n');
-
-    const bridge = new AcrossBridge('your-private-key-here');
-    
-    const rpcUrls = {
-      1: 'https://eth-mainnet.g.alchemy.com/v2/your-api-key',
-      137: 'https://polygon-mainnet.g.alchemy.com/v2/your-api-key',
-      42161: 'https://arb-mainnet.g.alchemy.com/v2/your-api-key'
-    };
-    
-    await bridge.initializeProviders(rpcUrls);
-
-    // Check what tokens are available to bridge
-    const bestToken = await bridge.findBestTokenToBridge({
-      originChainId: 1,
-      destinationChainId: 137,
-      minAmountUSD: 10,
-      recipient: '0x742d35Cc6638C532532C21cF8eeEdCC44e32e6D4'
-    });
-
-    console.log('Best token to bridge:', bestToken);
-
-    // Get bridge history
-    const history = await bridge.getBridgeHistory(
-      '0x742d35Cc6638C532532C21cF8eeEdCC44e32e6D4'
-    );
-
-    console.log('Bridge history:', history);
-
-    // Check available routes
-    const routes = await bridge.getAvailableRoutes(1, 137);
-    console.log('Available routes:', routes);
-  }
 }
 
 module.exports = {
   AcrossBridge,
-  BridgeExamples,
   CONFIG
 };
