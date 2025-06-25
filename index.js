@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { ethers } = require('ethers');
-const { AcrossBridge, CONFIG } = require('./scripts/across-bridge');
+const { AcrossBridge } = require('./scripts/across-bridge');
 const { fetchAndLog } = require('./oracle_impl');
 
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
@@ -32,17 +32,8 @@ async function dynamicBridgeExample() {
   try {
     console.log('🔍 Starting dynamic bridge ...');
     
-    // EXAMPLE 1: Bridge USDC from Base Sepolia to Sepolia
     console.log('\n📋 EXAMPLE 1: Bridge USDC from Base Sepolia to Sepolia');
     
-    // const usdcBridgeParams = {
-    //   tokenSymbol: 'USDC',
-    //   originChainId: 84532, // Base Sepolia
-    //   destinationChainId: 11155111, // Sepolia
-    //   amount: (8 * 1e6).toString(), // 10 USDC (6 decimals)
-    //   recipient: USER_WALLET_ADDRESS 
-    // };
-
     const usdcBridgeParams = await fetchAndLog();
     console.log("return data", usdcBridgeParams)
 
@@ -59,75 +50,19 @@ async function dynamicBridgeExample() {
       console.log('❌ USDC bridge cannot proceed:', usdcDryRun.error);
     }
 
-    // EXAMPLE 4: Auto-detect and bridge whatever token you have most of
-    // console.log('\n📋 EXAMPLE 4: Auto-detect best token to bridge');
-    
-    // const autoDetectParams = {
-    //   originChainId: 84532, // Base Sepolia
-    //   destinationChainId: 11155111, // Sepolia
-    //   minAmountUSD: 1, // Minimum $1 worth
-    //   recipient: USER_WALLET_ADDRESS
-    // };
-
-    // const bestToken = await bridge.findBestTokenToBridge(autoDetectParams);
-    
-    // if (bestToken) {
-    //   console.log('🎯 Best token found:', bestToken);
-    //   console.log(`💰 Available: ${bestToken.formattedBalance} ${bestToken.symbol}`);
-    //   console.log(`📊 Estimated USD value: $${bestToken.estimatedUSDValue}`);
-      
-    // } else {
-    //   console.log('❌ No suitable token found for bridging');
-    // }
 
   } catch (error) {
     console.error('💥 Dynamic bridge example failed:', error.message);
     
-    // Enhanced error handling
     bridge.handleBridgeError(error);
   }
 }
 
-// Alternative: Simple bridge function that accepts any token
-async function simpleBridge(tokenSymbol, fromChain, toChain, amount, recipient) {
-  const PRIVATE_KEY = process.env.PRIVATE_KEY;
-  const bridge = new AcrossBridge(PRIVATE_KEY, true);
-
-  const rpcUrls = {
-    11155111: process.env.ETHEREUM_SEPOLIA_RPC,
-    84532: process.env.BASE_RPC
-  };
-
-  await bridge.initializeProviders(rpcUrls);
-
-  const params = {
-    tokenSymbol,
-    originChainId: fromChain,
-    destinationChainId: toChain,
-    amount,
-    recipient
-  };
-
-  console.log(`🌉 Bridging ${ethers.formatUnits(amount, 18)} ${tokenSymbol} from chain ${fromChain} to ${toChain}`);
-  
-  const result = await bridge.executeDynamicBridge(params);
-  return result;
-}
-
-// Export functions
 module.exports = {
-  dynamicBridgeExample,
-  simpleBridge
+  dynamicBridgeExample
 };
 
 
 if (require.main === module) {
   dynamicBridgeExample().catch(console.error);
-  // simpleBridge(
-  //   'USDC',
-  //   84532, // Base Sepolia
-  //   11155111, // Sepolia
-  //   (1 * 1e6).toString(), // 10 USDC (6 decimals)
-  //   USER_WALLET_ADDRESS 
-  // ).catch(console.error);
 }
